@@ -1,0 +1,7 @@
+apis*/**
+build/**
+data*/**
+__pycache__/*
+tmp/*
+tree-sitter-*/**
+tree-sitter-*/*
