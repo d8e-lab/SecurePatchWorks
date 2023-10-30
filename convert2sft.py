@@ -6,17 +6,22 @@ import os
 import json
 import re
 import time
+import torch.distributed as dist
 
 gpu_id = int(int(os.environ["LOCAL_RANK"]))
 
 
 def count_CWE_file(src_path: str) -> int:
     count = 0
+    file_path=""
     for root, _dirs, files in os.walk(src_path):
         for file in files:
             if file.endswith('.java') and file.startswith('CWE'):
                 file_path = os.path.join(root, file)
                 count += 1
+    # if file_path=="":
+        # import pdb
+        # pdb.set_trace()
     return count, file_path
 
 
@@ -48,32 +53,65 @@ def build_translated_comments(translated: list) -> str:
         comments_translated += " */\n"
     return comments_translated
 
+def node_filter(node_list: list)->list:
+    del_node = []
+    method_names = []
+    for node in node_list:
+        for node_element in node.children:
+            if node_element.type == "identifier":
+                method_names.append(node_element.text.decode())
+                continue
+    for i,node in enumerate(node_list):
+        for node_element in node.children:
+            if node_element.type == "identifier":
+                method_name = node_element.text.decode()
+                print("method_name: ",method_name)
+                if method_name == "good":
+                    del_node.append(node)
+                    continue
+                elif method_name.startswith('good'):
+                    assert node.children[-1].type == 'block', print(node.children)
+                    # TODO remove involed function
+                    # if node.children[-1].find('good'):
+                    #     del_node.append(node)
+                    #     continue
+                    for invovled_method in method_names:
+                        if node.children[-1].text.decode().find(invovled_method)!=-1:
+                            del_node.append(node)
+                            break
+                    continue
+                else:
+                    raise RuntimeError("function name is not good*()")
+    return [node for node in node_list if node not in del_node]
+    
 
 def match_name(node_text: bytes, function_name: str) -> bool:
     function_name_bytes = function_name.encode('utf-8')
     decoded_node_text = node_text.decode('utf-8').strip()
+    if function_name=='good':
+        return decoded_node_text.startswith(function_name_bytes.decode('utf-8')) and (not decoded_node_text.endswith(function_name_bytes.decode('utf-8')))
     return decoded_node_text.startswith(function_name_bytes.decode('utf-8'))
 
 
 # return a list of block of function body with a count of function_name(good* or bad*)
+# dfs
 def find_function(node: Node, function_name: str) -> Node:
+    node.child_by_field_name
     count = 0
     node_list = []
     if node == None:
         return None
     if hasattr(node, 'text'):
         if match_name(node.text, function_name):
-            return [node.parent], count+1
+            if node.parent.type == "method_declaration":
+                return [node.parent], count+1
     for child in node.children:
         sub_list, sub_count = find_function(child, function_name)
         node_list.extend(sub_list)
         count += sub_count
     return node_list, count
 
-def count_good_occurrences(input_string):
-    # 将输入字符串转换为小写，以不区分大小写进行匹配
-    input_string = input_string.lower()
-    
+def count_good_occurrences(input_string):    
     # 初始化计数器
     count = 0
     
@@ -93,7 +131,7 @@ argparser.add_argument(
     '--library_path', type=str,default='/mnt/42_store/sbc/bug_detection/build/java.so')
 argparser.add_argument(
     '--language',type=str,default='java')
-argparser.add_argument('--model_name',type=str,default='/mnt/42_store/sbc/trans-opus-mt-en-zh',help="翻译模型的路径")
+argparser.add_argument('--model_path',type=str,default='/mnt/42_store/sbc/trans-opus-mt-en-zh',help="翻译模型的路径")
 argparser.add_argument(
     '--dataset_dir', type=str, default="/mnt/42_store/sbc/bug_detection/datasets")
 argparser.add_argument('--output_dir', type=str,
@@ -102,23 +140,23 @@ args = argparser.parse_args()
 JAVA_LANGUAGE = Language(args.library_path, args.language)
 parser.set_language(JAVA_LANGUAGE)
 
-mode_name = args.model_name
+mode_name = args.model_path
 model = AutoModelWithLMHead.from_pretrained(
     mode_name).bfloat16().to(gpu_id).eval()
 tokenizer = AutoTokenizer.from_pretrained(mode_name)
 translation = pipeline("translation_en_to_zh", model=model,
                        tokenizer=tokenizer, device=model.device)
 
-dir = args.dataset_dir
+dataset_dir = args.dataset_dir
 
-file_list = [file_name for file_name in os.listdir(dir)]
+file_list = [file_name for file_name in os.listdir(dataset_dir)]
 # print(file_list)
 file_count = 0
 data_list = []
 for file_name in tqdm(file_list, desc="Processing files"):
-    src_path = os.path.join(dir, file_name, "src")
+    src_path = os.path.join(dataset_dir, file_name, "src")
     count, file_path = count_CWE_file(src_path)
-    if count > 1:
+    if count > 1 or count==0:
         continue
 
     with open(file_path, 'r') as file:
@@ -127,9 +165,14 @@ for file_name in tqdm(file_list, desc="Processing files"):
         tree = parser.parse(bytes(code_string, 'utf-8'))
         # TODO 重构
         bad_functions,bad_count = find_function(tree.root_node, "bad")
-        good_functions,good_count = find_function(tree.root_node, "good")
-
+        if bad_count > 1:
+            continue
         if bad_count == 1:
+            import pdb
+            good_functions,good_count = find_function(tree.root_node, "good")
+            # pdb.set_trace()
+            good_functions = node_filter(good_functions)
+            # pdb.set_trace()
             bad_code_string = bad_functions[0].text.decode()
             bad_code_string = re.sub(
                 r'/\*([^*]|(\*+[^*/]))*\*+/', '', bad_code_string)
@@ -180,5 +223,6 @@ print(args.output_dir)
 saved_date = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
 output_file_path = os.path.join(args.output_dir, "bug_detection_sft"+saved_date+".json")
 print(output_file_path)
+
 with open(output_file_path, 'w') as output_file:
     json.dump(data_list, output_file, ensure_ascii=False, indent=4)
