@@ -7,21 +7,20 @@ import json
 import re
 import time
 import torch.distributed as dist
+import pdb
+from typing import Union
 
 gpu_id = int(int(os.environ["LOCAL_RANK"]))
 
 
-def count_CWE_file(src_path: str) -> int:
+def count_CWE_file(src_path: str,language: str) -> int:
     count = 0
     file_path=""
     for root, _dirs, files in os.walk(src_path):
         for file in files:
-            if file.endswith('.java') and file.startswith('CWE'):
+            if file.endswith('.'+language) and file.startswith('CWE'):
                 file_path = os.path.join(root, file)
                 count += 1
-    # if file_path=="":
-        # import pdb
-        # pdb.set_trace()
     return count, file_path
 
 
@@ -95,7 +94,9 @@ def match_name(node_text: bytes, function_name: str) -> bool:
 
 # return a list of block of function body with a count of function_name(good* or bad*)
 # dfs
-def find_function(node: Node, function_name: str) -> Node:
+def find_function(node: Node, function_name: str, language: str) -> Node:
+    # print(node.type)
+    method_type = "method_declaration" if language=="java" else "function_definition"
     node.child_by_field_name
     count = 0
     node_list = []
@@ -103,14 +104,14 @@ def find_function(node: Node, function_name: str) -> Node:
         return None
     if hasattr(node, 'text'):
         if match_name(node.text, function_name):
-            if node.parent.type == "method_declaration":
+            if node.parent.type == method_type:
                 return [node.parent], count+1
     for child in node.children:
-        sub_list, sub_count = find_function(child, function_name)
+        sub_list, sub_count = find_function(child, function_name, language)
         node_list.extend(sub_list)
         count += sub_count
     return node_list, count
-
+from peft import LoraConfig
 def count_good_occurrences(input_string):    
     # 初始化计数器
     count = 0
@@ -128,14 +129,14 @@ def count_good_occurrences(input_string):
 parser = Parser()
 argparser = argparse.ArgumentParser()
 argparser.add_argument(
-    '--library_path', type=str,default='/mnt/42_store/sbc/bug_detection/build/java.so')
+    '--library_path', type=str,default='build/java.so')
 argparser.add_argument(
     '--language',type=str,default='java')
 argparser.add_argument('--model_path',type=str,default='/mnt/42_store/sbc/trans-opus-mt-en-zh',help="翻译模型的路径")
 argparser.add_argument(
-    '--dataset_dir', type=str, default="/mnt/42_store/sbc/bug_detection/datasets")
+    '--dataset_dir', type=str, default="datasets")
 argparser.add_argument('--output_dir', type=str,
-                       default="/mnt/42_store/sbc/bug_detection/datasets_new")
+                       default="datasets_sft")
 args = argparser.parse_args()
 JAVA_LANGUAGE = Language(args.library_path, args.language)
 parser.set_language(JAVA_LANGUAGE)
@@ -155,7 +156,8 @@ file_count = 0
 data_list = []
 for file_name in tqdm(file_list, desc="Processing files"):
     src_path = os.path.join(dataset_dir, file_name, "src")
-    count, file_path = count_CWE_file(src_path)
+    count, file_path = count_CWE_file(src_path,args.language)
+    # pdb.set_trace()
     if count > 1 or count==0:
         continue
 
@@ -164,12 +166,13 @@ for file_name in tqdm(file_list, desc="Processing files"):
         code_string = file.read()
         tree = parser.parse(bytes(code_string, 'utf-8'))
         # TODO 重构
-        bad_functions,bad_count = find_function(tree.root_node, "bad")
+        bad_functions,bad_count = find_function(tree.root_node, "bad", args.language)
+        print("bad_count:",bad_count)
         if bad_count > 1:
             continue
         if bad_count == 1:
             import pdb
-            good_functions,good_count = find_function(tree.root_node, "good")
+            good_functions,good_count = find_function(tree.root_node, "good", args.language)
             # pdb.set_trace()
             good_functions = node_filter(good_functions)
             # pdb.set_trace()
@@ -220,6 +223,7 @@ for file_name in tqdm(file_list, desc="Processing files"):
             file_count += 1
 print(len(data_list))
 print(args.output_dir)
+os.system("mkdir -p "+args.output_dir)
 saved_date = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
 output_file_path = os.path.join(args.output_dir, "bug_detection_sft"+saved_date+".json")
 print(output_file_path)
