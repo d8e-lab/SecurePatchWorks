@@ -88,8 +88,8 @@ def match_name(node_text: bytes, function_name: str) -> bool:
     function_name_bytes = function_name.encode('utf-8')
     decoded_node_text = node_text.decode('utf-8').strip()
     if function_name=='good':
-        return decoded_node_text.startswith(function_name_bytes.decode('utf-8')) and (not decoded_node_text.endswith(function_name_bytes.decode('utf-8')))
-    return decoded_node_text.startswith(function_name_bytes.decode('utf-8'))
+        return function_name_bytes.decode('utf-8') in decoded_node_text and (not decoded_node_text==function_name_bytes.decode('utf-8'))
+    return function_name_bytes.decode('utf-8') in decoded_node_text
 
 
 # return a list of block of function body with a count of function_name(good* or bad*)
@@ -100,10 +100,13 @@ def find_function(node: Node, function_name: str, language: str) -> Node:
     node.child_by_field_name
     count = 0
     node_list = []
-    if node == None:
+    if node is None:
         return None
     if hasattr(node, 'text'):
+        # TODO match function name, instead of node.text
         if match_name(node.text, function_name):
+            if node.parent is None:
+                pdb.set_trace()
             if node.parent.type == method_type:
                 return [node.parent], count+1
     for child in node.children:
